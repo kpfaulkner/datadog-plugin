@@ -13,6 +13,7 @@ import (
 	"github.com/grafana/grafana-plugin-sdk-go/backend/instancemgmt"
 	"github.com/grafana/grafana-plugin-sdk-go/backend/log"
 	"github.com/grafana/grafana-plugin-sdk-go/data"
+	ddlog "github.com/kpfaulkner/ddlog/pkg"
 )
 
 type DatadogQuery struct {
@@ -57,6 +58,8 @@ type DatadogDataSource struct {
 	// creds to DD
 	datadogApiKey string
 	datadogAppKey string
+
+	datadogComms *ddlog.Datadog
 }
 
 // QueryData handles multiple queries and returns multiple responses.
@@ -66,35 +69,34 @@ type DatadogDataSource struct {
 func (td *DatadogDataSource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
 	log.DefaultLogger.Info("QueryData", "request", req)
 
-	queryBytes, _ := req.Queries[0].JSON.MarshalJSON()
-	var query DatadogQuery
-	err := json.Unmarshal(queryBytes, &query)
-	if err != nil {
-		return nil, err
-	}
+	// Haven't created Datadog instance yet (no API keys yet).
+	// So do this now!
+	// Need to check if this is threadsafe
+	if td.datadogComms == nil {
+    configBytes, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
+    var config DatadogPluginConfig
+    err := json.Unmarshal(configBytes, &config)
+    if err != nil {
+      return nil, err
+    }
+    td.datadogComms = ddlog.NewDatadog(config.DatadogAPIKey, config.DatadogAppKey)
+  }
 
-	configBytes, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
-	var config DatadogPluginConfig
-	err = json.Unmarshal(configBytes, &config)
-	if err != nil {
-		return nil, err
-	}
 
-	configString := fmt.Sprintf("CONFIG  %v", config)
-	queryString := fmt.Sprintf("QUERY %v", query)
-	log.DefaultLogger.Info(configString)
-	log.DefaultLogger.Info(queryString)
 
 	// create response struct
 	response := backend.NewQueryDataResponse()
 
 	// loop over queries and execute them individually.
 	for _, q := range req.Queries {
-		res := td.query(ctx, q)
+		res, err := td.query(ctx, q)
+		if err != nil {
+		  return nil, err
+    }
 
 		// save the response in a hashmap
 		// based on with RefID as identifier
-		response.Responses[q.RefID] = res
+		response.Responses[q.RefID] = *res
 	}
 
 	return response, nil
@@ -104,15 +106,26 @@ type queryModel struct {
 	Format string `json:"format"`
 }
 
-func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery) backend.DataResponse {
+func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery) (*backend.DataResponse, error) {
 	// Unmarshal the json into our queryModel
 	var qm queryModel
 
-	response := backend.DataResponse{}
+  queryBytes, _ := query.JSON.MarshalJSON()
+  var ddQuery DatadogQuery
+  err := json.Unmarshal(queryBytes, &ddQuery)
+  if err != nil {
+    // empty response? or real error? figure out later.
+    return nil, err
+  }
 
+
+  v := fmt.Sprintf("QUERY!!! %d", ddQuery.IntervalMs)
+  log.DefaultLogger.Info(v)
+
+	response := backend.DataResponse{}
 	response.Error = json.Unmarshal(query.JSON, &qm)
 	if response.Error != nil {
-		return response
+		return nil, err
 	}
 
 	// Log a warning if `Format` is empty.
@@ -120,12 +133,31 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 		log.DefaultLogger.Warn("format is empty. defaulting to time series")
 	}
 
+	// need to validate query to some degree. TODO(kpfaulkner) Validate!
+	queryText := ddQuery.QueryText
+  ddResponse, err := td.datadogComms.QueryDatadog(queryText, query.TimeRange.From.UTC(), query.TimeRange.To.UTC())
+  if err != nil {
+    return nil, err
+  }
+
 	// create data frame response
 	frame := data.NewFrame("response")
 
+	// generate time slice.
+	times := []time.Time{}
+  //counts := []int{}
+
+  //query.
+  for _,res := range ddResponse.Logs {
+	  times = append(times, res.Content.Timestamp)
+	  //counts = append(counts, res.Content.Message)
+  }
+
+  // counts
+
 	// add the time dimension
 	frame.Fields = append(frame.Fields,
-		data.NewField("time", nil, []time.Time{query.TimeRange.From, query.TimeRange.From.Add(10 * time.Minute), query.TimeRange.To}),
+		data.NewField("time", nil, []time.Time{query.TimeRange.From.UTC(), query.TimeRange.From.Add(10 * time.Minute), query.TimeRange.To}),
 	)
 
 	// add values
@@ -136,7 +168,7 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 	// add the frames to the response
 	response.Frames = append(response.Frames, frame)
 
-	return response
+	return &response, nil
 }
 
 // CheckHealth handles health checks sent from Grafana to the plugin.
