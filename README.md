@@ -1,5 +1,5 @@
-# Sendgrid-plugin for Grafana
+# Datadog-plugin for Grafana
 
-This is an initial attempt for retrieving the global statistics for Sengrid for use in Grafana. Very early stages, but DOES work. Need to determine signed vs unsigned plugins but that's probably it.
+This is an initial attempt for retrieving log counts from Datadog for use in Grafana. Very early stages, but DOES work.
 
-![sendgrid-grafana](./images/datadog-grafana.png)
+![datadog-grafana](./images/datadog-grafana.png)
