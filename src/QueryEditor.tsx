@@ -33,8 +33,9 @@ export class QueryEditor extends PureComponent<Props> {
           labelWidth={8}
           value={queryText || ''}
           onChange={this.onQueryTextChange}
-          label="Query Text"
-          tooltip="Not used yet"
+          label="Datadog Query"
+          tooltip="Datadog Query"
+          inputWidth={100}
         />
       </div>
     );

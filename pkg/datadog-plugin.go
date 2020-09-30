@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math/rand"
+	"github.com/kpfaulkner/ddlog/pkg/models"
 	"net/http"
 	"time"
 
@@ -30,6 +30,10 @@ type DatadogQuery struct {
 type DatadogPluginConfig struct {
 	DatadogAPIKey string `json:"datadogApiKey"`
 	DatadogAppKey string `json:"datadogAppKey"`
+}
+
+type queryModel struct {
+	Format string `json:"format"`
 }
 
 // newDatasource returns datasource.ServeOpts.
@@ -67,22 +71,18 @@ type DatadogDataSource struct {
 // The QueryDataResponse contains a map of RefID to the response for each query, and each response
 // contains Frames ([]*Frame).
 func (td *DatadogDataSource) QueryData(ctx context.Context, req *backend.QueryDataRequest) (*backend.QueryDataResponse, error) {
-	log.DefaultLogger.Info("QueryData", "request", req)
-
 	// Haven't created Datadog instance yet (no API keys yet).
 	// So do this now!
 	// Need to check if this is threadsafe
 	if td.datadogComms == nil {
-    configBytes, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
-    var config DatadogPluginConfig
-    err := json.Unmarshal(configBytes, &config)
-    if err != nil {
-      return nil, err
-    }
-    td.datadogComms = ddlog.NewDatadog(config.DatadogAPIKey, config.DatadogAppKey)
-  }
-
-
+		configBytes, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
+		var config DatadogPluginConfig
+		err := json.Unmarshal(configBytes, &config)
+		if err != nil {
+			return nil, err
+		}
+		td.datadogComms = ddlog.NewDatadog(config.DatadogAPIKey, config.DatadogAppKey)
+	}
 
 	// create response struct
 	response := backend.NewQueryDataResponse()
@@ -91,8 +91,8 @@ func (td *DatadogDataSource) QueryData(ctx context.Context, req *backend.QueryDa
 	for _, q := range req.Queries {
 		res, err := td.query(ctx, q)
 		if err != nil {
-		  return nil, err
-    }
+			return nil, err
+		}
 
 		// save the response in a hashmap
 		// based on with RefID as identifier
@@ -102,25 +102,39 @@ func (td *DatadogDataSource) QueryData(ctx context.Context, req *backend.QueryDa
 	return response, nil
 }
 
-type queryModel struct {
-	Format string `json:"format"`
+func (td *DatadogDataSource) executeQuery(queryText string, fromDate time.Time, toDate time.Time) ([]models.DataDogLog, error) {
+	resp, err := td.datadogComms.QueryDatadog(queryText, fromDate.UTC(), toDate.UTC())
+	if err != nil {
+		return nil, err
+	}
+
+	logs := []models.DataDogLog{}
+	logs = append(logs, resp.Logs...)
+
+	// now loop until no nextId
+	for resp.NextLogID != "" {
+		resp, err = td.datadogComms.QueryDatadogWithStartAt(queryText, fromDate.UTC(), toDate.UTC(), resp.NextLogID)
+		if err != nil {
+			fmt.Printf("ERROR %s\n", err.Error())
+			return nil, err
+		}
+		logs = append(logs, resp.Logs...)
+	}
+
+	return logs, nil
 }
 
 func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery) (*backend.DataResponse, error) {
 	// Unmarshal the json into our queryModel
 	var qm queryModel
 
-  queryBytes, _ := query.JSON.MarshalJSON()
-  var ddQuery DatadogQuery
-  err := json.Unmarshal(queryBytes, &ddQuery)
-  if err != nil {
-    // empty response? or real error? figure out later.
-    return nil, err
-  }
-
-
-  v := fmt.Sprintf("QUERY!!! %d", ddQuery.IntervalMs)
-  log.DefaultLogger.Info(v)
+	queryBytes, _ := query.JSON.MarshalJSON()
+	var ddQuery DatadogQuery
+	err := json.Unmarshal(queryBytes, &ddQuery)
+	if err != nil {
+		// empty response? or real error? figure out later.
+		return nil, err
+	}
 
 	response := backend.DataResponse{}
 	response.Error = json.Unmarshal(query.JSON, &qm)
@@ -133,36 +147,40 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 		log.DefaultLogger.Warn("format is empty. defaulting to time series")
 	}
 
-	// need to validate query to some degree. TODO(kpfaulkner) Validate!
-	queryText := ddQuery.QueryText
-  ddResponse, err := td.datadogComms.QueryDatadog(queryText, query.TimeRange.From.UTC(), query.TimeRange.To.UTC())
-  if err != nil {
-    return nil, err
-  }
+	logs, err := td.executeQuery(ddQuery.QueryText, query.TimeRange.From.UTC(), query.TimeRange.To.UTC())
+	if err != nil {
+		return nil, err
+	}
 
 	// create data frame response
 	frame := data.NewFrame("response")
 
 	// generate time slice.
 	times := []time.Time{}
-  //counts := []int{}
+	counts := []int64{}
+	groupedLogs := ddlog.GroupLogsByMinute(logs)
 
-  //query.
-  for _,res := range ddResponse.Logs {
-	  times = append(times, res.Content.Timestamp)
-	  //counts = append(counts, res.Content.Message)
-  }
+	//query.
+	for _, logEntry := range logs {
 
-  // counts
+		roundedTime := time.Date(logEntry.Content.Timestamp.Year(), logEntry.Content.Timestamp.Month(),
+			logEntry.Content.Timestamp.Day(), logEntry.Content.Timestamp.Hour(),
+			logEntry.Content.Timestamp.Minute(), 0, 0, logEntry.Content.Timestamp.Location())
+
+		times = append(times, roundedTime)
+
+		numberOfEntries := len(groupedLogs[roundedTime])
+		counts = append(counts, int64(numberOfEntries))
+	}
 
 	// add the time dimension
 	frame.Fields = append(frame.Fields,
-		data.NewField("time", nil, []time.Time{query.TimeRange.From.UTC(), query.TimeRange.From.Add(10 * time.Minute), query.TimeRange.To}),
+		data.NewField("time", nil, times),
 	)
 
 	// add values
 	frame.Fields = append(frame.Fields,
-		data.NewField("stuff", nil, []int64{10, 20, 15}),
+		data.NewField("entries", nil, counts),
 	)
 
 	// add the frames to the response
@@ -177,17 +195,25 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 // a datasource is working as expected.
 func (td *DatadogDataSource) CheckHealth(ctx context.Context, req *backend.CheckHealthRequest) (*backend.CheckHealthResult, error) {
 
-	rawJson, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
-
-	v := fmt.Sprintf("ZZZZZZZZZZZ heath config %s", string(rawJson))
-	log.DefaultLogger.Info(v)
-
 	var status = backend.HealthStatusOk
 	var message = "Data source is working"
 
-	if rand.Int()%2 == 0 {
+	rawJson, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
+	var config DatadogPluginConfig
+	err := json.Unmarshal(rawJson, &config)
+	if err != nil {
 		status = backend.HealthStatusError
-		message = "randomized error"
+		message = "Unable to communicate with Datadog"
+	}
+
+	// just do query ... no specific query but time range is same.
+	// If there is an auth issue the resp.Status will be "error"\
+	// WHY the err isn't set, I dont know.
+	td.datadogComms = ddlog.NewDatadog(config.DatadogAPIKey, config.DatadogAppKey)
+	resp, err := td.datadogComms.QueryDatadog("", time.Now().UTC(), time.Now().UTC())
+	if err != nil || resp.Status == "error" {
+		status = backend.HealthStatusError
+		message = "Unable to communicate with Datadog"
 	}
 
 	return &backend.CheckHealthResult{
@@ -201,11 +227,6 @@ type instanceSettings struct {
 }
 
 func newDataSourceInstance(setting backend.DataSourceInstanceSettings) (instancemgmt.Instance, error) {
-
-	log.DefaultLogger.Info("YYYYYYYYYYYYYYYYYYYYYYYYYYYYYY")
-	log.DefaultLogger.Info("settings", "settings", setting)
-
-	fmt.Printf("settings %v\n", setting)
 	return &instanceSettings{
 		httpClient: &http.Client{},
 	}, nil

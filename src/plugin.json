@@ -1,7 +1,7 @@
 {
   "type": "datasource",
   "name": "datadog-plugin",
-  "id": "ken-datadog-plugin",
+  "id": "kpfaulkner-datadog-plugin",
   "metrics": true,
   "backend": true,
   "alerting": true,
