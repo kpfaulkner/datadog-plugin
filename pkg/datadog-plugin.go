@@ -240,8 +240,7 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 		return nil, err
 	}
 
-	// create data frame response
-	frame := data.NewFrame("response")
+
   log.DefaultLogger.Debug(fmt.Sprintf("got %d logs", len(logs)))
 	ce, err := td.addToAndReturnCache(logs, ddQuery.QueryText, query.TimeRange.From.UTC(), query.TimeRange.To.UTC())
 	if err != nil {
@@ -259,6 +258,9 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
     c := ce.Data[t]
     counts = append(counts, c)
   }
+
+  // create data frame response
+  frame := data.NewFrame("response")
 
 	// add the time dimension
 	frame.Fields = append(frame.Fields,
