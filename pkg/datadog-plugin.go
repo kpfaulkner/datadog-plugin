@@ -6,7 +6,6 @@ import (
   "fmt"
   "github.com/kpfaulkner/ddlog/pkg/models"
   "net/http"
-  "strings"
   "time"
 
   "github.com/grafana/grafana-plugin-sdk-go/backend"
@@ -79,7 +78,7 @@ func (td *DatadogDataSource) QueryData(ctx context.Context, req *backend.QueryDa
 	// Need to check if this is threadsafe
 	if td.datadogComms == nil {
 
-		log.DefaultLogger.Info("setting up DD comms!!!!")
+		log.DefaultLogger.Debug("setting up DD comms!!!!")
 		configBytes, _ := req.PluginContext.DataSourceInstanceSettings.JSONData.MarshalJSON()
 		var config DatadogPluginConfig
 		err := json.Unmarshal(configBytes, &config)
@@ -109,6 +108,8 @@ func (td *DatadogDataSource) QueryData(ctx context.Context, req *backend.QueryDa
 
 // executeQuery
 func (td *DatadogDataSource) executeQuery(queryText string, fromDate time.Time, toDate time.Time) ([]models.DataDogLog, error) {
+
+  log.DefaultLogger.Debug(fmt.Sprintf("executeQuery start time %s end time %s", fromDate.UTC().Format("2006-01-02 15:04:05"),toDate.UTC().Format("2006-01-02 15:04:05")))
 	resp, err := td.datadogComms.QueryDatadog(queryText, fromDate.UTC(), toDate.UTC())
 	if err != nil {
 		return nil, err
@@ -134,20 +135,14 @@ func (td *DatadogDataSource) executeQuery(queryText string, fromDate time.Time, 
 // and new query, then only actually query DD for time range NOT in cache. Man that could be worded better.
 func (td *DatadogDataSource) checkCache(query string, startTime time.Time) (*time.Time, error) {
 
-  v := fmt.Sprintf("checkCache with start%s", startTime.UTC().Format("2006-01-02 15:04:05"))
-  log.DefaultLogger.Info(v)
-
-	lowerQuery := strings.ToLower(query)
-	cacheEntry, ok := td.cache.Get(lowerQuery)
+  log.DefaultLogger.Debug(fmt.Sprintf("checkCache with start%s", startTime.UTC().Format("2006-01-02 15:04:05")))
+	cacheEntry, ok := td.cache.Get(query)
 	if ok {
-    v := fmt.Sprintf("cache hit for query %s : st %s  : et %s", lowerQuery, cacheEntry.StartTime.UTC().Format("2006-01-02 15:04:05"), cacheEntry.EndTime.UTC().Format("2006-01-02 15:04:05"))
-    log.DefaultLogger.Info(v)
+    log.DefaultLogger.Debug(fmt.Sprintf("cache hit for query %s : st %s  : et %s", query, cacheEntry.StartTime.UTC().Format("2006-01-02 15:04:05"), cacheEntry.EndTime.UTC().Format("2006-01-02 15:04:05")))
+
 		// have results in cache. Check if there is any overlap with new query and cache entry.
 		if cacheEntry.EndTime.After(startTime) && startTime.After(cacheEntry.StartTime){
-		  //&&    } cacheEntry.StartTime.Before(startTime){
-
-		  // return 2 minutes earlier...  just to avoid any issues picking
-		  // Also round to beginning of minute.
+		  // return 2 minutes earlier...  just to avoid any issues with queries ending part way through a minute
 		  roundedTime := time.Date(cacheEntry.EndTime.Year(), cacheEntry.EndTime.Month(),
         cacheEntry.EndTime.Day(), cacheEntry.EndTime.Hour(),
         cacheEntry.EndTime.Add(-2*time.Minute).Minute(), 0, 0, cacheEntry.EndTime.Location())
@@ -197,8 +192,7 @@ func (td *DatadogDataSource) addToAndReturnCache(logs []models.DataDogLog, query
 
   // prune old entries.
   count, _ := ce.PruneBefore(startTime.UTC())
-  v := fmt.Sprintf("pruned %d", count)
-  log.DefaultLogger.Info(v)
+  log.DefaultLogger.Debug(fmt.Sprintf("pruned %d", count))
 
   // save it.
   td.cache.Set(query, ce)
@@ -233,17 +227,13 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 		log.DefaultLogger.Warn("format is empty. defaulting to time series")
 	}
 
-  v := fmt.Sprintf("ORIG start time %s end time %s", query.TimeRange.From.UTC().Format("2006-01-02 15:04:05"),query.TimeRange.To.UTC().Format("2006-01-02 15:04:05"))
-  log.DefaultLogger.Info(v)
+  log.DefaultLogger.Debug(fmt.Sprintf("ORIG start time %s end time %s", query.TimeRange.From.UTC().Format("2006-01-02 15:04:05"),query.TimeRange.To.UTC().Format("2006-01-02 15:04:05")))
 
   // check cache for if we should modify the query.
 	newStartTime, err := td.checkCache(ddQuery.QueryText, query.TimeRange.From.UTC())
 	if err != nil {
     return nil, err
   }
-
-  v = fmt.Sprintf("start time %s end time %s", newStartTime.UTC().Format("2006-01-02 15:04:05"),query.TimeRange.To.UTC().Format("2006-01-02 15:04:05"))
-  log.DefaultLogger.Info(v)
 
 	logs, err := td.executeQuery(ddQuery.QueryText, newStartTime.UTC(), query.TimeRange.To.UTC())
 	if err != nil {
@@ -252,10 +242,7 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 
 	// create data frame response
 	frame := data.NewFrame("response")
-
-  v = fmt.Sprintf("got %d logs", len(logs))
-  log.DefaultLogger.Info(v)
-
+  log.DefaultLogger.Debug(fmt.Sprintf("got %d logs", len(logs)))
 	ce, err := td.addToAndReturnCache(logs, ddQuery.QueryText, query.TimeRange.From.UTC(), query.TimeRange.To.UTC())
 	if err != nil {
 	  return nil, err
@@ -266,9 +253,7 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 
   // generate time slice.
   counts := []int64{}
-
-  v = fmt.Sprintf("number of TOTAL unique times logs %d", len(times))
-  log.DefaultLogger.Info(v)
+  log.DefaultLogger.Debug(fmt.Sprintf("number of TOTAL unique times logs %d", len(times)))
 
   for _,t := range times {
     c := ce.Data[t]
