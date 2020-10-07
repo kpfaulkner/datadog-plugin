@@ -158,19 +158,20 @@ func (td *DatadogDataSource) checkCache(query string, startTime time.Time) (*tim
 	return &startTime, nil
 }
 
-func (td *DatadogDataSource) addToAndReturnCache(logs []models.DataDogLog, query string, startTime time.Time) (*CacheEntry, error) {
+func (td *DatadogDataSource) addToAndReturnCache(logs []models.DataDogLog, query string, startTime time.Time, endTime time.Time) (*CacheEntry, error) {
 
   var ce *CacheEntry
   var ok bool
-  lowerQuery := strings.ToLower(query)
 
   // merge these logs into cache.
-  ce, ok = td.cache.Get(lowerQuery)
+  ce, ok = td.cache.Get(query)
   if !ok {
     // dont have one... create a new one.
     ce = NewCacheEntry()
-    ce.Query = lowerQuery
+    ce.Query = query
   }
+
+  newEntries := make(map[time.Time]bool)
 
   // add all new entries to cache.
   for _, logEntry := range logs {
@@ -179,15 +180,28 @@ func (td *DatadogDataSource) addToAndReturnCache(logs []models.DataDogLog, query
       logEntry.Content.Timestamp.Day(), logEntry.Content.Timestamp.Hour(),
       logEntry.Content.Timestamp.Minute(), 0, 0, logEntry.Content.Timestamp.Location())
 
-    // increment one at a time...
-    ce.Data[roundedTime] = ce.Data[roundedTime] + 1
+    // check if roundedTime already exists
+    // if so, clear it out (we're replacing with updated)
+    // and mark in newEntries map that we've already done this.
+    if newEntries[roundedTime] {
+      // increment one at a time...
+      ce.Data[roundedTime] = ce.Data[roundedTime] + 1
+    } else {
+      newEntries[roundedTime] = true
+      ce.Data[roundedTime] = 1
+    }
   }
+
+  ce.StartTime = startTime
+  ce.EndTime = endTime
 
   // prune old entries.
   count, _ := ce.PruneBefore(startTime.UTC())
+  v := fmt.Sprintf("pruned %d", count)
+  log.DefaultLogger.Info(v)
 
   // save it.
-  td.cache.Set(lowerQuery, ce)
+  td.cache.Set(query, ce)
   return ce,nil
 }
 
@@ -239,43 +253,13 @@ func (td *DatadogDataSource) query(ctx context.Context, query backend.DataQuery)
 	// create data frame response
 	frame := data.NewFrame("response")
 
-	groupedLogs := ddlog.GroupLogsByMinute(logs)
-
-	var ce *CacheEntry
-	var ok bool
-  lowerQuery := strings.ToLower(ddQuery.QueryText)
-	// merge these logs into cache.
-	ce, ok = td.cache.Get(lowerQuery)
-	if !ok {
-	  // dont have one... create a new one.
-    ce = NewCacheEntry()
-    ce.Query = lowerQuery
-  }
-
-  v = fmt.Sprintf("number of new logs %d", len(logs))
+  v = fmt.Sprintf("got %d logs", len(logs))
   log.DefaultLogger.Info(v)
 
-	// add all new entries to cache.
-	for _, logEntry := range logs {
-
-		roundedTime := time.Date(logEntry.Content.Timestamp.Year(), logEntry.Content.Timestamp.Month(),
-			logEntry.Content.Timestamp.Day(), logEntry.Content.Timestamp.Hour(),
-			logEntry.Content.Timestamp.Minute(), 0, 0, logEntry.Content.Timestamp.Location())
-
-		numberOfEntries := len(groupedLogs[roundedTime])
-		ce.Data[roundedTime] = int64(numberOfEntries)
-	}
-
-
-	//ce.StartTime = newStartTime.UTC()
-  ce.StartTime = query.TimeRange.From.UTC()
-	ce.EndTime = query.TimeRange.To.UTC()
-
-  // prune old entries.
-  ce.PruneBefore(ce.StartTime)
-
-  // save it.
-	td.cache.Set(lowerQuery, ce)
+	ce, err := td.addToAndReturnCache(logs, ddQuery.QueryText, query.TimeRange.From.UTC(), query.TimeRange.To.UTC())
+	if err != nil {
+	  return nil, err
+  }
 
 	// get linear list of logs from cache.
 	times := ce.GetKeysInOrder()
