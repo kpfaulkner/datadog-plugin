@@ -122,7 +122,6 @@ func (td *DatadogDataSource) executeQuery(queryText string, fromDate time.Time, 
 	for resp.NextLogID != "" {
 		resp, err = td.datadogComms.QueryDatadogWithStartAt(queryText, fromDate.UTC(), toDate.UTC(), resp.NextLogID)
 		if err != nil {
-			fmt.Printf("ERROR %s\n", err.Error())
 			return nil, err
 		}
 		logs = append(logs, resp.Logs...)
@@ -291,6 +290,7 @@ func (td *DatadogDataSource) CheckHealth(ctx context.Context, req *backend.Check
 	var config DatadogPluginConfig
 	err := json.Unmarshal(rawJson, &config)
 	if err != nil {
+    log.DefaultLogger.Error(fmt.Sprintf("Unable to get config for health check %s", err.Error()))
 		status = backend.HealthStatusError
 		message = "Unable to communicate with Datadog"
 	}
@@ -301,6 +301,7 @@ func (td *DatadogDataSource) CheckHealth(ctx context.Context, req *backend.Check
 	td.datadogComms = ddlog.NewDatadog(config.DatadogAPIKey, config.DatadogAppKey)
 	resp, err := td.datadogComms.QueryDatadog("", time.Now().UTC(), time.Now().UTC())
 	if err != nil || resp.Status == "error" {
+    log.DefaultLogger.Error(fmt.Sprintf("Unable to query DD for health check %s", err.Error()))
 		status = backend.HealthStatusError
 		message = "Unable to communicate with Datadog"
 	}
